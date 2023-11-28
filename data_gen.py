@@ -99,7 +99,7 @@ if __name__=="__main__":
     '''
         parsing and execution
     '''
-    parser = argparse.ArgumentParser("Robust Scanner tfrecord Dataset Creation Script")
+    parser = argparse.ArgumentParser("ApsisNetv2 tfrecord Dataset Creation Script")
     parser.add_argument("data_csv", help="Path of the data_csv holding absolute image path,word and language [cols:filepath,word,lang]")
     parser.add_argument("vocab_txt", help="Path of the vocab.txt file holding the unicodes to use")
     parser.add_argument("save_path", help="Path of the directory to save the tfrecord dataset")
