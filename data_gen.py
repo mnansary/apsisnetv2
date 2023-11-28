@@ -53,6 +53,7 @@ def main(args):
 
     df=pd.read_csv(data_csv)
     print("total data:",len(df))
+    df["word"]=df["word"].progress_apply(lambda x:str(x))
     df["word"]=df["word"].progress_apply(lambda x: x if len(x)<cfg.pos_max-2 else None)
     df.dropna(inplace=True)
     df["word"]=df["word"].progress_apply(lambda x: check_text(x,cfg.vocab))
