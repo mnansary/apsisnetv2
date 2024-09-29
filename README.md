@@ -112,25 +112,6 @@ optional arguments:
 * For training ```notebooks/train_recognizer.ipynb``` is used. 
 * Check notebook first cell for variable parameters
 
-### Stage-1 
-* lowering the Training steps and training for 20 epochs 
-
-```python
-PRETRAINED_WEIGHT_PATHS = None
-...
-...
-...
-STEPS_PER_EPOCH = ((len(train_recs)*tf_size)//(BATCH_SIZE))//10
-EVAL_STEPS      = ((len(eval_recs)*tf_size)//(BATCH_SIZE))//5
-```
-
-* results
-
-|loss|C_acc|val_loss|val_C_acc|
-|----|-----|--------|---------|
-|0.0019560614600777626|0.9994895458221436|0.0015700346557423472|0.999584972858429|
-
-* time= 7100s (+-10s) per epoch
- 
-### Stage-2 
-* Original Training steps and training for 2 epochs from the previous step 
+# Generator Training
+* Download ```model.h5``` from the [AI for Bangla 1.0 champion](https://www.tbsnews.net/bangladesh/10-teams-awarded-developing-bangla-based-ai-and-nlp-technology-374515) github repository [link](https://github.com/mnansary/bnhocr)
+* use this file as the pretrained model  

@@ -1,15 +1,19 @@
 #------------------------------
 # change able params
 #------------------------------
-PRETRAINED_WEIGHT_PATHS = "/home/nazmuddoha_ansary/work/apsisnetv2/model/rec_20_epochs_shortsteps.h5"
+RECOGNIZER_WEIGHT_PATH  = "/home/nazmuddoha_ansary/work/apsisnetv2/model/rec_2_epochs_2nd_stage.h5"
+
+GENERATOR_WEIGHT_PATH    = "/home/nazmuddoha_ansary/work/apsisnetv2/model/generator_s1_5ep_10div.h5"
 
 TRAIN_GCS_PATTERNS      = ["/backup2/apsisnetv2/tfrecords/*/*/*.tfrecord"]
                            
 EVAL_GCS_PATTERNS       = ["/backup2/apsisnetv2/tfrecords/part_0/*/*.tfrecord"]
 
-PER_REPLICA_BATCH_SIZE  = 64                          
+PER_REPLICA_BATCH_SIZE  = 64                         
 
-EPOCHS                  = 2
+EPOCHS                  = 5
+
+GENERATOR_BACKBONE      = 'densenet121'
 
 #----------------
 # imports
@@ -36,7 +40,11 @@ warnings.filterwarnings('ignore')
 # Customize TensorFlow logger to show only errors
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
-
+#-----------------------------------------
+# segmentation model backend setup
+#-----------------------------------------
+os.environ['SM_FRAMEWORK'] = 'tf.keras'
+import segmentation_models as sm
 #---------------------
 # GPU device setup
 #---------------------
@@ -67,7 +75,7 @@ img_width =256
 img_height=32
 pos_max   =40
 tf_size   =1024
-vocab    = ["blank","!","\"","#","$","%","&","'","(",")","*","+",",","-",".","/","0","1","2","3",
+vocab    = ["\u200d","!","\"","#","$","%","&","'","(",")","*","+",",","-",".","/","0","1","2","3",
             "4","5","6","7","8","9",":",";","<","=",">","?","@","A","B","C","D","E","F","G",
             "H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","[",
             "\\","]","^","_","`","a","b","c","d","e","f","g","h","i","j","k","l","m","n","o",
@@ -84,6 +92,7 @@ enc_filters =  512
 
 # calculated
 pad_value   =  vocab.index("pad")
+sep_value   =  vocab.index("sep") 
 voc_len     =  len(vocab)
 
 pos_emb              = nn.Embedding(pos_max+1,enc_filters)
@@ -168,10 +177,18 @@ def data_input_fn(recs,mode):
         }    
         parsed_example=tf.io.parse_single_example(example,feature)
         # image
-        image=parsed_example['std']
+        image=parsed_example['image']
         image=tf.image.decode_png(image,channels=nb_channels)
         image=tf.cast(image,tf.float32)/255.0
         image=tf.reshape(image,(img_height,img_width,nb_channels))
+        image=tf.image.resize(image,[2*img_height,2*img_width])
+        # std
+        std=parsed_example['std']
+        std=tf.image.decode_png(std,channels=nb_channels)
+        std=tf.cast(std,tf.float32)/255.0
+        std=tf.reshape(std,(img_height,img_width,nb_channels))
+        std=tf.image.resize(std,[2*img_height,2*img_width])
+        
         # label
         label=parsed_example['label']
         label = tf.strings.to_number(tf.strings.split(label), out_type=tf.float32)
@@ -181,7 +198,7 @@ def data_input_fn(recs,mode):
         pos=tf.range(0,pos_max)
         pos=tf.cast(pos,tf.int32) 
         
-        return {"image":image,"pos":pos},label
+        return image,std,pos,label
 
     
     # fixed code (for almost all tfrec training)
@@ -207,36 +224,25 @@ langs=["bn","en"]
 print("---------------------------------------------------------------")
 print("visualizing data")
 print("---------------------------------------------------------------")
-for data,label in train_ds.take(1):
-    images=data["image"]
-    posis=data["pos"]
+for images,stds,poss,labels in train_ds.take(1):
     print("image")
     data=np.squeeze(images[0])
     plt.imshow(data)
     plt.show()    
     print("---------------------------------------------------------------")
-    _label=label[0].numpy()
+    _label=labels[0].numpy()
     print(_label)
     text="".join([vocab[int(c)] for c in _label if vocab[int(c)] not in ["pad","sep"]])
     print("label :",text)
     print("---------------------------------------------------------------")
     print('Batch Shape:',images.shape)
     print("---------------------------------------------------------------")
-
-#     print("Positional encoding:",posis[0])
-#     print("mask")
-#     data=np.squeeze(mask[0])
-#     plt.imshow(data)
-#     plt.show()
-#     print("std")
-#     data=np.squeeze(std[0])
-#     plt.imshow(data)
-#     plt.show()
-#     print("---------------------------------------------------------------")
-#     _lang=lang[0].numpy()
-#     _lang=langs[int(_lang)]
-#     print("lang:",_lang)
-
+    print("Positional encoding:",poss[0])
+    print("std")
+    data=np.squeeze(stds[0])
+    plt.imshow(data)
+    plt.show()
+    print("---------------------------------------------------------------")
 
 #--------------------------------------------
 # custom layers
@@ -348,7 +354,7 @@ def attend(x,mask,num_heads,num_blocks,reshape=True):
 # metrics and losses
 #--------------------------------------------------------
 
-def C_acc(y_true, y_pred):
+def rec_acc(y_pred, y_true):
     accuracies = tf.equal(tf.cast(y_true,tf.int64), tf.argmax(y_pred, axis=2))
     mask = tf.math.logical_not(tf.math.equal(y_true,pad_value))
     accuracies = tf.math.logical_and(mask, accuracies)
@@ -356,64 +362,20 @@ def C_acc(y_true, y_pred):
     mask = tf.cast(mask, dtype=tf.float32)
     return tf.reduce_sum(accuracies)/tf.reduce_sum(mask)
 
-class CharLoss(tf.keras.losses.Loss):
-    def __init__(self,pad_value):
-        super(CharLoss, self).__init__(name="char_loss")
-        self.pad_value=pad_value
-        self.loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
-    def call(self, y_true, y_pred):
-        mask = tf.math.logical_not(tf.math.equal(y_true, pad_value))
-        loss_ = self.loss_object(y_true, y_pred)
-        mask = tf.cast(mask, dtype=loss_.dtype)
-        loss_ *= mask
-        return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
-    
+# loss
+rec_loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
+mse = tf.keras.losses.MeanSquaredError()
 
-class CTCLoss(tf.keras.losses.Loss):
-    def __init__(self,pad_value,logits_time_major=False,name='ctc'):
-        super().__init__(name=name)
-        self.logits_time_major = logits_time_major
-        self.pad_value=pad_value
+def rec_loss(pred, real):
+    mask = tf.math.logical_not(tf.math.equal(real, pad_value))
+    loss_ = rec_loss_object(real, pred)
+    mask = tf.cast(mask, dtype=loss_.dtype)
+    loss_ *= mask
+    return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
 
-    def call(self, y_true, y_pred):
-        y_true = tf.cast(y_true, tf.int32)
-        logit_length = tf.fill([tf.shape(y_pred)[0]], tf.shape(y_pred)[1])
-        label_mask = tf.cast(y_true!= self.pad_value, tf.int32)
-        label_length = tf.reduce_sum(label_mask, axis=-1)
-        
-        loss = tf.nn.ctc_loss(
-            labels=y_true,
-            logits=y_pred,
-            label_length=label_length,
-            logit_length=logit_length,
-            logits_time_major=self.logits_time_major,
-            blank_index=self.pad_value)
-        return tf.reduce_mean(loss)
+def gen_loss(pred,real):    
+    return 100*mse(real,pred)
 
-#------------------------------------------------------------------
-# callbacks 
-#------------------------------------------------------------------
-
-# early stopping
-early_stopping = tf.keras.callbacks.EarlyStopping(patience=40, 
-                                                  verbose=1, 
-                                                  mode = 'auto')
-
-class SaveBestModel(tf.keras.callbacks.Callback):
-    def __init__(self,model_dir):
-        self.best = float('inf')
-        self.output_dir = model_dir
-
-    def on_epoch_end(self, epoch, logs=None):
-        metric_value = logs['val_loss']
-        if metric_value < self.best:
-            print(f"Loss Improved epoch:{epoch} from {self.best} to {metric_value}",end="#")
-            self.best = metric_value
-            save_path = os.path.join(self.output_dir, "rec_best.h5")
-            self.model.save_weights(save_path)
-            print("Saved Weights")
-    def set_model(self, model):
-        self.model = model
 
 def build_model():
     img_shape=(img_height,img_width,nb_channels)
@@ -433,13 +395,110 @@ def build_model():
     return model
 
 with strategy.scope():
-    lr_schedule = tf.keras.experimental.CosineDecay(initial_learning_rate=0.0001,decay_steps=600000,alpha= 0.01)
-    model = build_model()
-    if PRETRAINED_WEIGHT_PATHS is not None:
-        model.load_weights(PRETRAINED_WEIGHT_PATHS)
-    model.compile(optimizer=tf.keras.optimizers.Adam(lr_schedule),
-                  loss=CharLoss(pad_value),
-                  metrics=[C_acc])
+    recognizer=build_model()
+    recognizer.load_weights(RECOGNIZER_WEIGHT_PATH)
+    generator=sm.Unet(GENERATOR_BACKBONE,input_shape=(2*img_height,2*img_width,3), classes=3,encoder_weights=None)
+    generator.load_weights(GENERATOR_WEIGHT_PATH)
+
+class ApsisNetv2(tf.keras.Model):
+    def __init__(self,generator,recognizer,loss_factor=1):
+        super(ApsisNetv2, self).__init__()
+        self.generator   = generator
+        self.recognizer  = recognizer
+        self.loss_factor = loss_factor
+        
+    def compile(self,optimizer,loss_recognizer,loss_generator,acc_recognizer):
+        super(ApsisNetv2, self).compile(optimizer=optimizer)
+        self.optimizer  = optimizer
+        self.loss_rec   = loss_recognizer
+        self.loss_gen   = loss_generator
+        self.acc_rec    = acc_recognizer
+        
+
+    def train_step(self, batch_data):
+        image,std,pos,gt= batch_data
+        
+        with tf.GradientTape() as gen_tape:
+            generated    = self.generator(image)
+            gen_resized  = tf.image.resize(generated,[img_height,img_width])
+            pred         = self.recognizer({"image":gen_resized,"pos":pos},training=False)
+            # loss
+            loss_gen = self.loss_gen(generated,std)
+            loss_rec = self.loss_rec(pred,gt)
+            # acc
+            acc_rec=self.acc_rec(pred,gt)
+
+            loss=loss_gen+self.loss_factor*loss_rec
+        # calc gradients    
+        gen_grads     = gen_tape.gradient(loss,self.generator.trainable_variables)
+        
+        # apply
+        self.optimizer.apply_gradients(zip(gen_grads,self.generator.trainable_variables))
+
+        return {"loss_gen"    : loss_gen,
+                "loss_rec"    : loss_rec,
+                "loss"        : loss,
+                "char_acc": acc_rec}
+
+    def test_step(self, batch_data):
+        image,std,pos,gt= batch_data
+        
+        generated    = self.generator(image,training=False)
+        gen_resized  = tf.image.resize(generated,[img_height,img_width])
+        pred         = self.recognizer({"image":gen_resized,"pos":pos},training=False)
+        
+        # loss
+        loss_gen = self.loss_gen(generated,std)
+        loss_rec = self.loss_rec(pred,gt)
+        # acc
+        acc_rec=self.acc_rec(pred,gt)
+
+        loss=loss_gen+self.loss_factor*loss_rec
+        
+        return {"loss_gen"    : loss_gen,
+                "loss_rec"    : loss_rec,
+                "loss"        : loss,
+                "char_acc": acc_rec}
+    
+
+lr_schedule = tf.keras.optimizers.schedules.CosineDecay(initial_learning_rate=0.0001,
+                                                 decay_steps=600000,
+                                                 alpha= 0.01)
+optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+
+with strategy.scope():
+    model = ApsisNetv2(generator,recognizer)
+
+model.compile(optimizer,rec_loss,gen_loss,rec_acc)
+
+
+
+
+
+#------------------------------------------------------------------
+# callbacks 
+#------------------------------------------------------------------
+
+# early stopping
+early_stopping = tf.keras.callbacks.EarlyStopping(patience=40, 
+                                                  verbose=1, 
+                                                  mode = 'auto')
+
+class SaveBestModel(tf.keras.callbacks.Callback):
+    def __init__(self,model_dir):
+        self.best = 0
+        self.output_dir = model_dir
+
+    def on_epoch_end(self, epoch, logs=None):
+        metric_value = logs['val_char_acc']
+        if metric_value > self.best:
+            print(f"Loss Improved epoch:{epoch} from {self.best} to {metric_value}",end="#")
+            self.best = metric_value
+            save_path = os.path.join(self.output_dir, "generator_best.h5")
+            self.model.generator.save_weights(save_path)
+            print("Saved Weights")
+    def set_model(self, model):
+        self.model = model
 
 # call back setup
 model_save=SaveBestModel(model_dir)
@@ -454,6 +513,8 @@ history=model.fit(train_ds,
                   validation_data=eval_ds,
                   validation_steps=EVAL_STEPS, 
                   callbacks=callbacks)
+
+
 
 curves={}
 for key in history.history.keys():
