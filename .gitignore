@@ -160,3 +160,5 @@ cython_debug/
 #.idea/
 debug*.ipynb
 model/*
+tfrecords/*
+*.csv

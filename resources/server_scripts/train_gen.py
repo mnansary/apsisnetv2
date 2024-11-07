@@ -1,15 +1,20 @@
 #------------------------------
 # change able params
 #------------------------------
-PRETRAINED_WEIGHT_PATHS = "/home/nazmuddoha_ansary/work/apsisnetv2/model/rec_2_epochs_2nd_stage.h5"
+RECOGNIZER_WEIGHT_PATH = "/home/nazmuddoha_ansary/work/apsisnetv2/model/rec_binarized.h5"
 
-TRAIN_GCS_PATTERNS      = ["/backup2/apsisnetv2/tfrecords/*/*/*.tfrecord"]
+TRAIN_GCS_PATTERNS      = ["/home/nazmuddoha_ansary/work/apsisnetv2/tfrecords/*/*/*.tfrecord"]
                            
-EVAL_GCS_PATTERNS       = ["/backup2/apsisnetv2/tfrecords/part_0/*/*.tfrecord"]
+EVAL_GCS_PATTERNS       = ["/home/nazmuddoha_ansary/work/apsisnetv2/tfrecords/part_0/*/*.tfrecord"]
 
-PER_REPLICA_BATCH_SIZE  = 64                          
+GENERATOR_WEIGHT_PATH    = "/home/nazmuddoha_ansary/work/apsisnetv2/model/model.h5"
 
-EPOCHS                  = 2
+
+PER_REPLICA_BATCH_SIZE  = 32                         
+
+EPOCHS                  = 5
+
+GENERATOR_BACKBONE      = 'densenet121'
 
 #----------------
 # imports
@@ -36,7 +41,11 @@ warnings.filterwarnings('ignore')
 # Customize TensorFlow logger to show only errors
 logging.getLogger('tensorflow').setLevel(logging.ERROR)
 
-
+#-----------------------------------------
+# segmentation model backend setup
+#-----------------------------------------
+os.environ['SM_FRAMEWORK'] = 'tf.keras'
+import segmentation_models as sm
 #---------------------
 # GPU device setup
 #---------------------
@@ -67,7 +76,7 @@ img_width =256
 img_height=32
 pos_max   =40
 tf_size   =1024
-vocab    = ["blank","!","\"","#","$","%","&","'","(",")","*","+",",","-",".","/","0","1","2","3",
+vocab    = ["\u200d","!","\"","#","$","%","&","'","(",")","*","+",",","-",".","/","0","1","2","3",
             "4","5","6","7","8","9",":",";","<","=",">","?","@","A","B","C","D","E","F","G",
             "H","I","J","K","L","M","N","O","P","Q","R","S","T","U","V","W","X","Y","Z","[",
             "\\","]","^","_","`","a","b","c","d","e","f","g","h","i","j","k","l","m","n","o",
@@ -84,6 +93,7 @@ enc_filters =  512
 
 # calculated
 pad_value   =  vocab.index("pad")
+sep_value   =  vocab.index("sep") 
 voc_len     =  len(vocab)
 
 pos_emb              = nn.Embedding(pos_max+1,enc_filters)
@@ -139,7 +149,7 @@ print("Decay Steps:",DECAY_STEPS)
 #------------------------------
 # parsing tfrecords basic
 #------------------------------
-def data_input_fn(recs,mode,threshold = 0.5): 
+def data_input_fn(recs,mode,threshold=0.5): 
     '''
       This Function generates data from gcs
       * The parser function should look similiar now because of datasetEDA
@@ -170,11 +180,20 @@ def data_input_fn(recs,mode,threshold = 0.5):
         }    
         parsed_example=tf.io.parse_single_example(example,feature)
         # image
-        image=parsed_example['std']
+        image=parsed_example['image']
         image=tf.image.decode_png(image,channels=nb_channels)
         image=tf.cast(image,tf.float32)/255.0
-        image = tf.where(image> threshold, 1.0, 0.0)
         image=tf.reshape(image,(img_height,img_width,nb_channels))
+        image=tf.image.resize(image,[2*img_height,2*img_width])
+        
+        # std
+        std=parsed_example['std']
+        std=tf.image.decode_png(std,channels=nb_channels)
+        std=tf.cast(std,tf.float32)/255.0
+        std=tf.reshape(std,(img_height,img_width,nb_channels))
+        std=tf.image.resize(std,[2*img_height,2*img_width])
+        std = tf.where(std> threshold, 1.0, 0.0)
+        
         # label
         label=parsed_example['label']
         label = tf.strings.to_number(tf.strings.split(label), out_type=tf.float32)
@@ -184,7 +203,7 @@ def data_input_fn(recs,mode,threshold = 0.5):
         pos=tf.range(0,pos_max)
         pos=tf.cast(pos,tf.int32) 
         
-        return {"image":image,"pos":pos},label
+        return image,std,pos,label
 
     
     # fixed code (for almost all tfrec training)
@@ -210,36 +229,25 @@ langs=["bn","en"]
 print("---------------------------------------------------------------")
 print("visualizing data")
 print("---------------------------------------------------------------")
-for data,label in train_ds.take(1):
-    images=data["image"]
-    posis=data["pos"]
+for images,stds,poss,labels in train_ds.take(1):
     print("image")
     data=np.squeeze(images[0])
-    print(np.unique(images[0]))
     plt.imshow(data)
     plt.show()    
     print("---------------------------------------------------------------")
-    _label=label[0].numpy()
+    _label=labels[0].numpy()
     print(_label)
     text="".join([vocab[int(c)] for c in _label if vocab[int(c)] not in ["pad","sep"]])
     print("label :",text)
     print("---------------------------------------------------------------")
     print('Batch Shape:',images.shape)
     print("---------------------------------------------------------------")
-
-#     print("Positional encoding:",posis[0])
-#     print("mask")
-#     data=np.squeeze(mask[0])
-#     plt.imshow(data)
-#     plt.show()
-#     print("std")
-#     data=np.squeeze(std[0])
-#     plt.imshow(data)
-#     plt.show()
-#     print("---------------------------------------------------------------")
-#     _lang=lang[0].numpy()
-#     _lang=langs[int(_lang)]
-#     print("lang:",_lang)
+    print("Positional encoding:",poss[0])
+    print("std")
+    data=np.squeeze(stds[0])
+    plt.imshow(data)
+    plt.show()
+    print("---------------------------------------------------------------")
 
 #--------------------------------------------
 # custom layers
@@ -347,11 +355,23 @@ def attend(x,mask,num_heads,num_blocks,reshape=True):
         x = tf.keras.layers.Reshape((h,w,nc))(x)
     return x
 
+#----------------------------------------------
+# discriminator downsample block
+#----------------------------------------------
+def downsample(filters, size, apply_norm=True):
+  initializer = tf.random_normal_initializer(0., 0.02)
+  result = tf.keras.Sequential()
+  result.add(tf.keras.layers.Conv2D(filters, size, strides=2, padding='same',kernel_initializer=initializer, use_bias=False))
+  if apply_norm: result.add(tf.keras.layers.BatchNormalization())
+  result.add(tf.keras.layers.LeakyReLU())
+  return result
+
+
 #--------------------------------------------------------
 # metrics and losses
 #--------------------------------------------------------
 
-def C_acc(y_true, y_pred):
+def recognizer_accuracy(y_pred, y_true):
     accuracies = tf.equal(tf.cast(y_true,tf.int64), tf.argmax(y_pred, axis=2))
     mask = tf.math.logical_not(tf.math.equal(y_true,pad_value))
     accuracies = tf.math.logical_and(mask, accuracies)
@@ -359,64 +379,30 @@ def C_acc(y_true, y_pred):
     mask = tf.cast(mask, dtype=tf.float32)
     return tf.reduce_sum(accuracies)/tf.reduce_sum(mask)
 
-class CharLoss(tf.keras.losses.Loss):
-    def __init__(self,pad_value):
-        super(CharLoss, self).__init__(name="char_loss")
-        self.pad_value=pad_value
-        self.loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
-    def call(self, y_true, y_pred):
-        mask = tf.math.logical_not(tf.math.equal(y_true, pad_value))
-        loss_ = self.loss_object(y_true, y_pred)
-        mask = tf.cast(mask, dtype=loss_.dtype)
-        loss_ *= mask
-        return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
-    
+# loss
+loss_object = tf.keras.losses.BinaryCrossentropy(from_logits=True)
+rec_loss_object = tf.keras.losses.SparseCategoricalCrossentropy(from_logits=True, reduction='none')
 
-class CTCLoss(tf.keras.losses.Loss):
-    def __init__(self,pad_value,logits_time_major=False,name='ctc'):
-        super().__init__(name=name)
-        self.logits_time_major = logits_time_major
-        self.pad_value=pad_value
+def recognizer_loss(pred, real):
+    mask = tf.math.logical_not(tf.math.equal(real, pad_value))
+    loss_ = rec_loss_object(real, pred)
+    mask = tf.cast(mask, dtype=loss_.dtype)
+    loss_ *= mask
+    return tf.reduce_sum(loss_)/tf.reduce_sum(mask)
 
-    def call(self, y_true, y_pred):
-        y_true = tf.cast(y_true, tf.int32)
-        logit_length = tf.fill([tf.shape(y_pred)[0]], tf.shape(y_pred)[1])
-        label_mask = tf.cast(y_true!= self.pad_value, tf.int32)
-        label_length = tf.reduce_sum(label_mask, axis=-1)
-        
-        loss = tf.nn.ctc_loss(
-            labels=y_true,
-            logits=y_pred,
-            label_length=label_length,
-            logit_length=logit_length,
-            logits_time_major=self.logits_time_major,
-            blank_index=self.pad_value)
-        return tf.reduce_mean(loss)
+def discriminator_loss(disc_real_output, disc_generated_output):
+    real_loss = loss_object(tf.ones_like(disc_real_output), disc_real_output)
+    generated_loss = loss_object(tf.zeros_like(disc_generated_output), disc_generated_output)
+    total_disc_loss = real_loss + generated_loss
+    return total_disc_loss
 
-#------------------------------------------------------------------
-# callbacks 
-#------------------------------------------------------------------
+def generator_loss(disc_generated_output, gen_output, target,lambda_value=100):
+    gan_loss = loss_object(tf.ones_like(disc_generated_output), disc_generated_output)
+    # mean absolute error
+    l1_loss = tf.reduce_mean(tf.abs(target - gen_output))
+    total_gen_loss = gan_loss + (lambda_value * l1_loss)
+    return total_gen_loss
 
-# early stopping
-early_stopping = tf.keras.callbacks.EarlyStopping(patience=40, 
-                                                  verbose=1, 
-                                                  mode = 'auto')
-
-class SaveBestModel(tf.keras.callbacks.Callback):
-    def __init__(self,model_dir):
-        self.best = float('inf')
-        self.output_dir = model_dir
-
-    def on_epoch_end(self, epoch, logs=None):
-        metric_value = logs['val_loss']
-        if metric_value < self.best:
-            print(f"Loss Improved epoch:{epoch} from {self.best} to {metric_value}",end="#")
-            self.best = metric_value
-            save_path = os.path.join(self.output_dir, "rec_best.h5")
-            self.model.save_weights(save_path)
-            print("Saved Weights")
-    def set_model(self, model):
-        self.model = model
 
 def build_model():
     img_shape=(img_height,img_width,nb_channels)
@@ -435,16 +421,188 @@ def build_model():
     model = tf.keras.Model(inputs=[img,pos],outputs=x)
     return model
 
+def build_discriminator():
+    """PatchGan discriminator model (https://arxiv.org/abs/1611.07004). """
+    
+    initializer = tf.random_normal_initializer(0., 0.02)
+
+    inp = tf.keras.layers.Input(shape=[64,512, 3], name='input_image')
+    tar = tf.keras.layers.Input(shape=[64,512, 3], name='target_image')
+    x = tf.keras.layers.concatenate([inp, tar])  
+    down1 = downsample(64, 4,False)(x)  
+    down2 = downsample(128, 4)(down1)  
+    down3 = downsample(256, 4)(down2)  
+    down4 = downsample(512, 4)(down3)  
+    zero_pad1 = tf.keras.layers.ZeroPadding2D()(down4)  
+    conv = tf.keras.layers.Conv2D(512, 4, strides=1, kernel_initializer=initializer,use_bias=False)(zero_pad1)  
+    norm1 = tf.keras.layers.BatchNormalization()(conv)
+    leaky_relu = tf.keras.layers.LeakyReLU()(norm1)
+    zero_pad2 = tf.keras.layers.ZeroPadding2D()(leaky_relu)  
+    last = tf.keras.layers.Conv2D(1, 4, strides=1,kernel_initializer=initializer)(zero_pad2) 
+    return tf.keras.Model(inputs=[inp, tar], outputs=last)
+
+
+
 with strategy.scope():
-    lr_schedule = tf.keras.experimental.CosineDecay(initial_learning_rate=0.0001,
-                                                    decay_steps=DECAY_STEPS,
-                                                    alpha= 0.01)
-    model = build_model()
-    if PRETRAINED_WEIGHT_PATHS is not None:
-        model.load_weights(PRETRAINED_WEIGHT_PATHS)
-    model.compile(optimizer=tf.keras.optimizers.Adam(lr_schedule),
-                  loss=CharLoss(pad_value),
-                  metrics=[C_acc])
+    recognizer=build_model()
+    recognizer.load_weights(RECOGNIZER_WEIGHT_PATH)
+    generator=sm.Unet(GENERATOR_BACKBONE,input_shape=(2*img_height,2*img_width,3), classes=3,encoder_weights=None)
+    generator.load_weights(GENERATOR_WEIGHT_PATH)
+    discriminator=build_discriminator()
+
+class ApsisNetv2(tf.keras.Model):
+    def __init__(self,
+                 generator,
+                 recognizer,
+                 discriminator,
+                 loss_factor=10,
+                 threshold=0.5):
+        super(ApsisNetv2, self).__init__()
+        self.generator     = generator
+        self.recognizer    = recognizer
+        self.discriminator = discriminator
+        self.loss_factor   = loss_factor
+        self.threshold     = threshold
+        
+    def compile(self,
+                gen_optimizer,
+                disc_optimizer,
+                loss_recognizer,
+                loss_generator,
+                loss_discriminator,
+                acc_recognizer):
+        super(ApsisNetv2, self).compile()
+        
+        self.opt_gen  = gen_optimizer
+        self.opt_disc = disc_optimizer
+        
+        self.loss_rec   = loss_recognizer
+        self.loss_gen   = loss_generator
+        self.loss_disc  = loss_discriminator
+        
+        self.acc_rec    = acc_recognizer
+        
+
+    def train_step(self, batch_data):
+        image,std,pos,gt= batch_data
+        
+        with tf.GradientTape() as gen_tape, tf.GradientTape() as disc_tape:
+            # generated
+            generated  = self.generator(image)
+            
+            # real output patch disc
+            disc_real_output = self.discriminator([image, std], training=True)
+            # generated output patch disc
+            disc_gen_output = self.discriminator( [image, generated], training=True)
+            # reconizer
+            gen_resized  = tf.image.resize(generated,[img_height,img_width])
+            gen_resized  = tf.where(gen_resized> self.threshold, 1.0, 0.0)
+            pred         = self.recognizer({"image":gen_resized,"pos":pos},training=False)
+            
+            # loss
+            loss_gen = self.loss_gen(disc_gen_output, generated, std)
+            loss_disc = self.loss_disc(disc_real_output, disc_gen_output)
+            loss_rec = self.loss_rec(pred,gt)
+            loss=loss_gen+self.loss_factor*loss_rec
+            # acc
+            acc_rec=self.acc_rec(pred,gt)
+
+            
+        # calc gradients    
+        gen_grads     = gen_tape.gradient(loss,self.generator.trainable_variables)
+        disc_grads    = disc_tape.gradient(loss_disc,self.discriminator.trainable_variables)
+        
+        # apply
+        self.opt_gen.apply_gradients(zip(gen_grads,self.generator.trainable_variables))
+        self.opt_disc.apply_gradients(zip(gen_grads,self.generator.trainable_variables))
+        
+
+        return {"loss_gen"    : loss_gen,
+                "loss_disc"   : loss_disc,  
+                "loss_rec"    : loss_rec,
+                "loss"        : loss,
+                "char_acc": acc_rec}
+
+    def test_step(self, batch_data):
+        image,std,pos,gt= batch_data
+        
+        # generated
+        generated  = self.generator(image,training=False)
+        
+        # real output patch disc
+        disc_real_output = self.discriminator([image, std], training=False)
+        # generated output patch disc
+        disc_gen_output = self.discriminator( [image, generated], training=False)
+        # reconizer
+        gen_resized  = tf.image.resize(generated,[img_height,img_width])
+        gen_resized  = tf.where(gen_resized> self.threshold, 1.0, 0.0)
+        pred         = self.recognizer({"image":gen_resized,"pos":pos},training=False)
+        
+        # loss
+        loss_gen = self.loss_gen(disc_gen_output, generated, std)
+        loss_disc = self.loss_disc(disc_real_output, disc_gen_output)
+        loss_rec = self.loss_rec(pred,gt)
+        loss=loss_gen+self.loss_factor*loss_rec
+        # acc
+        acc_rec=self.acc_rec(pred,gt)
+        
+        return {"loss_gen"    : loss_gen,
+                "loss_disc"   : loss_disc,  
+                "loss_rec"    : loss_rec,
+                "loss"        : loss,
+                "char_acc": acc_rec}
+
+
+lr_schedule = tf.keras.optimizers.schedules.CosineDecay(initial_learning_rate=0.0001,
+                                                 decay_steps=DECAY_STEPS,
+                                                 alpha= 0.01)
+# optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+
+generator_optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+discriminator_optimizer = tf.keras.optimizers.Adam(learning_rate=lr_schedule)
+
+with strategy.scope():
+    model = ApsisNetv2(generator,
+                       recognizer,
+                       discriminator)
+
+
+model.compile(generator_optimizer,
+              discriminator_optimizer,
+              recognizer_loss,
+              generator_loss,
+              discriminator_loss,
+              recognizer_accuracy)
+
+
+
+
+#------------------------------------------------------------------
+# callbacks 
+#------------------------------------------------------------------
+
+# early stopping
+early_stopping = tf.keras.callbacks.EarlyStopping(patience=40, 
+                                                  verbose=1, 
+                                                  mode = 'auto')
+
+class SaveBestModel(tf.keras.callbacks.Callback):
+    def __init__(self,model_dir):
+        self.best = 0
+        self.output_dir = model_dir
+
+    def on_epoch_end(self, epoch, logs=None):
+        metric_value = logs['val_char_acc']
+        if metric_value > self.best:
+            print(f"Loss Improved epoch:{epoch} from {self.best} to {metric_value}",end="#")
+            self.best = metric_value
+            save_path = os.path.join(self.output_dir, "generator_best.h5")
+            self.model.generator.save_weights(save_path)
+            save_path = os.path.join(self.output_dir, "discriminator_best.h5")
+            self.model.discriminator.save_weights(save_path)
+            print("Saved Weights")
+    def set_model(self, model):
+        self.model = model
 
 # call back setup
 model_save=SaveBestModel(model_dir)
@@ -459,8 +617,10 @@ history=model.fit(train_ds,
                   validation_steps=EVAL_STEPS, 
                   callbacks=callbacks)
 
+
+
 curves={}
 for key in history.history.keys():
     curves[key]=history.history[key]
 curves=pd.DataFrame(curves)
-curves.to_csv(f"history.csv",index=False)
+curves.to_csv(f"history_gan_gen_rec_32batch_5eps.csv",index=False)
