@@ -182,17 +182,17 @@ def data_input_fn(recs,mode,threshold=0.5):
         # image
         image=parsed_example['image']
         image=tf.image.decode_png(image,channels=nb_channels)
-        image=tf.cast(image,tf.float32)/255.0
+        image=(tf.cast(image,tf.float32)/127.5) -1
         image=tf.reshape(image,(img_height,img_width,nb_channels))
         image=tf.image.resize(image,[2*img_height,2*img_width])
         
         # std
         std=parsed_example['std']
         std=tf.image.decode_png(std,channels=nb_channels)
-        std=tf.cast(std,tf.float32)/255.0
+        std=(tf.cast(std,tf.float32)/127.5) -1
         std=tf.reshape(std,(img_height,img_width,nb_channels))
         std=tf.image.resize(std,[2*img_height,2*img_width])
-        std = tf.where(std> threshold, 1.0, 0.0)
+        # std = tf.where(std> threshold, 1.0, 0.0)
         
         # label
         label=parsed_example['label']
