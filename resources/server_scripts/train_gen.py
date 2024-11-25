@@ -7,15 +7,16 @@ TRAIN_GCS_PATTERNS      = ["/home/nazmuddoha_ansary/work/apsisnetv2/tfrecords/*/
                            
 EVAL_GCS_PATTERNS       = ["/home/nazmuddoha_ansary/work/apsisnetv2/tfrecords/part_0/*/*.tfrecord"]
 
-GENERATOR_WEIGHT_PATH    = "/home/nazmuddoha_ansary/work/apsisnetv2/model/model.h5"
+GENERATOR_WEIGHT_PATH    = "/home/nazmuddoha_ansary/work/apsisnetv2/model/generator_best.h5"
+
+DISCRIMINATOR_WEIGHT_PATH ="/home/nazmuddoha_ansary/work/apsisnetv2/model/discriminator_best.h5" 
 
 
-PER_REPLICA_BATCH_SIZE  = 32                         
+PER_REPLICA_BATCH_SIZE  = 64                         
 
-EPOCHS                  = 5
+EPOCHS                  = 10
 
 GENERATOR_BACKBONE      = 'densenet121'
-
 #----------------
 # imports
 #---------------
@@ -192,7 +193,7 @@ def data_input_fn(recs,mode,threshold=0.5):
         std=(tf.cast(std,tf.float32)/127.5) -1
         std=tf.reshape(std,(img_height,img_width,nb_channels))
         std=tf.image.resize(std,[2*img_height,2*img_width])
-        # std = tf.where(std> threshold, 1.0, 0.0)
+        std = tf.where(std> threshold, 1.0, 0.0)
         
         # label
         label=parsed_example['label']
@@ -449,6 +450,8 @@ with strategy.scope():
     generator=sm.Unet(GENERATOR_BACKBONE,input_shape=(2*img_height,2*img_width,3), classes=3,encoder_weights=None)
     generator.load_weights(GENERATOR_WEIGHT_PATH)
     discriminator=build_discriminator()
+    discriminator.load_weights(DISCRIMINATOR_WEIGHT_PATH)
+
 
 class ApsisNetv2(tf.keras.Model):
     def __init__(self,
@@ -623,4 +626,4 @@ curves={}
 for key in history.history.keys():
     curves[key]=history.history[key]
 curves=pd.DataFrame(curves)
-curves.to_csv(f"history_gan_gen_rec_32batch_5eps.csv",index=False)
+curves.to_csv(f"history_gan_gen_rec_64batch_10eps.csv",index=False)
