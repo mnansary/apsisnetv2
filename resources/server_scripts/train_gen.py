@@ -193,7 +193,7 @@ def data_input_fn(recs,mode,threshold=0.5):
         std=(tf.cast(std,tf.float32)/127.5) -1
         std=tf.reshape(std,(img_height,img_width,nb_channels))
         std=tf.image.resize(std,[2*img_height,2*img_width])
-        std = tf.where(std> threshold, 1.0, 0.0)
+        #std = tf.where(std> threshold, 1.0, 0.0)
         
         # label
         label=parsed_example['label']
