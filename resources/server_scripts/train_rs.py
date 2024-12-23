@@ -300,7 +300,7 @@ def encoder():
     # img input
     img=tf.keras.Input(shape=(img_height,img_width,nb_channels),name='image')
     
-    cnn = tf.keras.applications.ResNet50V2(input_tensor=img,weights=None,include_top=False)
+    cnn = tf.keras.applications.densenet.DenseNet121(input_tensor=img,weights=None,include_top=False)
     enc = cnn.output
     # enc 
     enc=tf.keras.layers.Conv2D(enc_filters,kernel_size=3,padding="same")(enc)
