@@ -6,6 +6,8 @@ pip install apsisocr
 pip install onnxruntime-gpu==1.16.0
 python -m pip install -U fastdeploy-gpu-python -f https://www.paddlepaddle.org.cn/whl/fastdeploy.html
 pip install torch==2.0.1 torchvision==0.15.2 --index-url https://download.pytorch.org/whl/cu118
+python install_detectron2.py
+pip install timm
 pip install ultralytics
 pip install shapely
 pip install pycocotools

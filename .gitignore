@@ -164,3 +164,5 @@ tfrecords/*
 *.csv
 weights/best.pt
 weights/robust_scanner_resnet50/* 
+detectron2/
+extra/*
