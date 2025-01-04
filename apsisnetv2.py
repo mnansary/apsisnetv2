@@ -53,12 +53,11 @@ def main():
     # Instructions
     st.markdown("*click on the top-right corner of an image to enlarge it!*")
     # Set the columns
-    cols = st.columns((1,1,1,1,1))
+    cols = st.columns((1,1,1,1))
     cols[0].subheader("Input Image")
     cols[1].subheader("Processed Image")
     cols[2].subheader("Word Detection")
-    cols[3].subheader("Document Layout")
-    cols[4].subheader("Text and Reading Order")
+    cols[3].subheader("Text and Reading Order")
     
     
     if uploaded_file is not None:
@@ -72,19 +71,18 @@ def main():
         # word-detection
         word_det_viz=draw_word_polys(output["rotation"]["rotated_image"],[entry["poly"] for entry in output["words"]])
         cols[2].image(word_det_viz)
-        # layout 
-        layout_viz=draw_document_layout(output["rotation"]["rotated_image"],output["segments"])
-        cols[3].image(layout_viz)
         # recognition and rdo
         df=pd.DataFrame(output["words"])
         df=df[['text','line_num','word_num']]
-        cols[4].dataframe(df)
+        cols[3].dataframe(df)
         # text construction
-        st.title("Layout wise text construction")
-        segments=output["segments"]
-        words=output["words"]
-        segmented_data=process_segments_and_words(segments,words)
-        layout_text_data=construct_text_from_segments(segmented_data)
+        st.title("text re-construction")
+        layout_text_data=""
+        for line in sorted(df.line_num.unique()):
+            ldf=df.loc[df.line_num==line]
+            ldf=ldf.sort_values(by=["word_num"])
+            layout_text_data+=" ".join(ldf.text.tolist())
+            layout_text_data+="\n"
         st.text_area("layout text", value=layout_text_data,height=400)
         
         # Word Analysis

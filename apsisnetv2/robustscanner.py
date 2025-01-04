@@ -16,9 +16,13 @@ from tqdm.auto import tqdm
 from scipy.special import softmax
 from termcolor import colored
 from apsisocr.utils import LOG_INFO,correctPadding
+from apsisocr.apsisnet import ApsisNet
+from bnunicodenormalizer import Normalizer
 #----------------
 # model
 #---------------
+NORM=Normalizer(allow_english=True)
+
 class DotAttention(tf.keras.layers.Layer):
     """
         Calculate the attention weights.
@@ -271,6 +275,14 @@ class RobustScanner(object):
                 _label=[_label[0]]
             
             texts.append("".join([self.vocab[l] for l in _label]))
+        
+        normalized = [NORM(text)["normalized"] for text in texts]
+        for idx in range(len(normalized)):
+            if normalized[idx] is not None:
+                texts[idx] = normalized[idx]
+            else:
+                texts[idx] = ""
+
         return texts
 
     def infer(self,image_list,batch_size=32,infer_len=40):
